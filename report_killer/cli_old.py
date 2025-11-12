@@ -72,8 +72,7 @@ def configure():
 @click.option('--api-key', help='API key (overrides config)')
 @click.option('--model', help='Model name (overrides config)')
 @click.option('--prompt', help='Additional prompt (overrides config)')
-@click.option('--test-mode', is_flag=True, help='Use stdio for LLM interaction (testing)')
-def process(input_file, output, api_key, model, prompt, test_mode):
+def process(input_file, output, api_key, model, prompt):
     """Process a Word document and fill in the answers."""
     console.print(Panel.fit("📝 [bold]Report Killer - Document Processor[/bold]"))
     
@@ -88,15 +87,14 @@ def process(input_file, output, api_key, model, prompt, test_mode):
     if prompt:
         config.custom_prompt = prompt
     
-    # Validate configuration (not needed in test mode)
-    if not test_mode and not config.api_key:
+    # Validate configuration
+    if not config.api_key:
         console.print("[red]Error: API key not configured![/red]")
         console.print("Run 'report-killer configure' to set up your API key.")
-        console.print("Or use --test-mode to test with stdio interaction.")
         return
     
     # Create agent
-    agent = ReportAgent(config, test_mode=test_mode)
+    agent = ReportAgent(config)
     
     # Process document
     output_path = output or input_file
@@ -111,8 +109,7 @@ def process(input_file, output, api_key, model, prompt, test_mode):
 
 
 @cli.command()
-@click.option('--test-mode', is_flag=True, help='Use stdio for LLM interaction (testing)')
-def test(test_mode):
+def test():
     """Test the Report Killer with the test document."""
     console.print(Panel.fit("🧪 [bold]Report Killer - Test Mode[/bold]"))
     
@@ -125,10 +122,9 @@ def test(test_mode):
     # Load configuration
     config = Config.load()
     
-    if not test_mode and not config.api_key:
+    if not config.api_key:
         console.print("[red]Error: API key not configured![/red]")
         console.print("Run 'report-killer configure' to set up your API key.")
-        console.print("Or use --test-mode to test with stdio interaction.")
         return
     
     # Create documents directory
@@ -143,11 +139,8 @@ def test(test_mode):
     console.print(f"[cyan]Testing with:[/cyan] {test_file}")
     console.print(f"[cyan]Output will be saved to:[/cyan] {output_file}")
     
-    if test_mode:
-        console.print("[yellow]Running in STDIO test mode - you will act as the LLM[/yellow]")
-    
     # Create agent
-    agent = ReportAgent(config, test_mode=test_mode)
+    agent = ReportAgent(config)
     
     # Process document
     success = agent.process_document(str(output_file))
@@ -181,15 +174,10 @@ def info():
     checks = agent.check_environment()
     
     console.print("\n[cyan]Environment Check:[/cyan]")
-    console.print(f"  {'✓' if checks['python'] else '✗'} Python 3.10+")
-    console.print(f"  {'✓' if checks['api_key'] else '✗'} API Key")
-    
-    console.print("\n[cyan]Code Execution:[/cyan]")
-    if checks['code_execution']['available']:
-        for lang in checks['code_execution']['available']:
-            console.print(f"  ✓ {lang}")
-    else:
-        console.print("  [yellow]No code execution tools available[/yellow]")
+    for check, passed in checks.items():
+        status = "✓" if passed else "✗"
+        color = "green" if passed else "red"
+        console.print(f"  [{color}]{status}[/{color}] {check}")
 
 
 def main():
