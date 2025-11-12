@@ -101,8 +101,14 @@ class CodeExecutor:
     
     def compile_c_cpp(self, source_file: Path, output_file: Optional[Path] = None) -> Tuple[bool, str]:
         """Compile C/C++ code."""
+        # Ensure source file is absolute path
+        if not source_file.is_absolute():
+            source_file = self.workspace / source_file.name
+        
         if output_file is None:
             output_file = source_file.with_suffix('.exe' if self.system == 'Windows' else '')
+        elif not output_file.is_absolute():
+            output_file = self.workspace / output_file.name
         
         # Determine compiler
         if source_file.suffix in ['.cpp', '.cc', '.cxx']:
@@ -116,7 +122,6 @@ class CodeExecutor:
                 capture_output=True,
                 text=True,
                 timeout=30,
-                cwd=self.workspace
             )
             
             if result.returncode == 0:
@@ -134,6 +139,10 @@ class CodeExecutor:
         if args is None:
             args = []
         
+        # Ensure executable is absolute path
+        if not executable.is_absolute():
+            executable = self.workspace / executable.name
+        
         try:
             result = subprocess.run(
                 [str(executable)] + args,
@@ -141,7 +150,6 @@ class CodeExecutor:
                 text=True,
                 input=input_data,
                 timeout=30,
-                cwd=self.workspace
             )
             
             output = result.stdout
@@ -163,13 +171,15 @@ class CodeExecutor:
             args = []
         
         try:
+            # Use absolute path for the script
+            script_path = script_file if script_file.is_absolute() else self.workspace / script_file.name
+            
             result = subprocess.run(
-                [python_cmd, str(script_file)] + args,
+                [python_cmd, str(script_path)] + args,
                 capture_output=True,
                 text=True,
                 input=input_data,
                 timeout=30,
-                cwd=self.workspace
             )
             
             output = result.stdout
