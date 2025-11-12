@@ -5,7 +5,12 @@ import zipfile
 import tempfile
 import shutil
 from pathlib import Path
-from xml.etree import ElementTree as ET
+try:
+    from lxml import etree as ET
+    LXML_AVAILABLE = True
+except ImportError:
+    from xml.etree import ElementTree as ET
+    LXML_AVAILABLE = False
 import re
 
 
@@ -24,6 +29,8 @@ class DocxHandler:
         """Initialize with a document filepath."""
         self.filepath = filepath
         self.document_xml = None
+        self.root = None
+        self.body = None
         self.paragraphs = []
         self.namespace = None
         self._temp_dir = None
@@ -38,24 +45,32 @@ class DocxHandler:
         
         # Load and parse document.xml
         doc_path = Path(self._temp_dir) / 'word' / 'document.xml'
-        with open(doc_path, 'r', encoding='utf-8') as f:
-            self.document_xml = ET.parse(f)
+        
+        if LXML_AVAILABLE:
+            parser = ET.XMLParser(remove_blank_text=False)
+            self.document_xml = ET.parse(str(doc_path), parser)
+        else:
+            self.document_xml = ET.parse(doc_path)
         
         # Detect namespace
-        root = self.document_xml.getroot()
-        self.namespace = root.tag.split('}')[0].strip('{')
+        self.root = self.document_xml.getroot()
+        self.namespace = self.root.tag.split('}')[0].strip('{')
+        
+        # Find body element
+        ns = {'w': self.namespace}
+        self.body = self.root.find('.//w:body', ns)
         
         # Parse paragraphs
         self._parse_paragraphs()
     
     def _parse_paragraphs(self):
         """Parse all paragraphs from the document XML."""
-        root = self.document_xml.getroot()
         ns = {'w': self.namespace}
         
-        # Find all paragraphs
-        para_elements = root.findall('.//w:p', ns)
+        # Find all paragraphs in body
+        para_elements = self.body.findall('.//w:p', ns)
         
+        self.paragraphs = []
         for elem in para_elements:
             text_parts = []
             for text_elem in elem.findall('.//w:t', ns):
@@ -129,7 +144,10 @@ class DocxHandler:
         ns = {'w': self.namespace}
         
         # Create new paragraph
-        new_para = ET.Element(f'{{{self.namespace}}}p')
+        if LXML_AVAILABLE:
+            new_para = ET.Element(f'{{{self.namespace}}}p', nsmap={'w': self.namespace})
+        else:
+            new_para = ET.Element(f'{{{self.namespace}}}p')
         
         # Create run
         new_run = ET.SubElement(new_para, f'{{{self.namespace}}}r')
@@ -138,13 +156,28 @@ class DocxHandler:
         new_text = ET.SubElement(new_run, f'{{{self.namespace}}}t')
         new_text.text = text
         
+        # Preserve whitespace
+        if LXML_AVAILABLE:
+            new_text.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        
         # Insert after the target paragraph
         target_elem = self.paragraphs[para_index]['element']
-        parent = target_elem.getparent()
         
-        # Find position of target in parent
-        index = list(parent).index(target_elem)
-        parent.insert(index + 1, new_para)
+        if LXML_AVAILABLE:
+            parent = target_elem.getparent()
+            index = list(parent).index(target_elem)
+            parent.insert(index + 1, new_para)
+        else:
+            # For ElementTree, we need to find the parent manually
+            # Insert in body element at the end for now
+            body_paras = list(self.body)
+            try:
+                index = body_paras.index(target_elem)
+                # This is a workaround - we'll insert at the right position
+                self.body.insert(index + 1, new_para)
+            except ValueError:
+                # If we can't find it, append at the end
+                self.body.append(new_para)
         
         # Update our paragraphs list
         self._parse_paragraphs()
@@ -179,12 +212,20 @@ class DocxHandler:
         
         # Write the modified document.xml back
         doc_path = Path(self._temp_dir) / 'word' / 'document.xml'
-        self.document_xml.write(
-            doc_path,
-            encoding='utf-8',
-            xml_declaration=True,
-            default_namespace=None
-        )
+        
+        if LXML_AVAILABLE:
+            self.document_xml.write(
+                str(doc_path),
+                encoding='utf-8',
+                xml_declaration=True,
+                pretty_print=False
+            )
+        else:
+            self.document_xml.write(
+                doc_path,
+                encoding='utf-8',
+                xml_declaration=True
+            )
         
         # Create new zip file
         save_path = output_path or self.filepath
