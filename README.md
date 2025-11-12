@@ -2,6 +2,8 @@
 
 一个智能的文档填写助手，使用 AI 自动理解并填写 Word 文档中的问题和空白。
 
+⚠️ **重要提示**：使用本工具需要有效的 OpenAI 兼容 API 密钥。请参阅 [SETUP.md](SETUP.md) 获取详细的配置指南。
+
 ## 功能特性
 
 - 📝 **自动理解文档**：智能解析 Word 文档内容，识别问题和需要填写的位置
@@ -41,7 +43,18 @@ uv pip install -e .
 
 ## 快速开始
 
-### 1. 配置
+📖 **完整配置指南请参阅 [SETUP.md](SETUP.md)**
+
+### 1. 获取 API 密钥
+
+你需要一个 OpenAI 兼容的 API 密钥。推荐选项：
+- **OpenRouter**：适合测试，支持多种模型 (https://openrouter.ai/)
+- **OpenAI**：官方 API (https://platform.openai.com/)
+- **本地 LLM**：如 LM Studio、Ollama 等
+
+详细获取步骤请参阅 [SETUP.md](SETUP.md)。
+
+### 2. 配置
 
 首次使用前，需要配置 API 密钥和其他设置：
 
@@ -56,7 +69,7 @@ report-killer configure
 - **代理设置**（可选）：HTTP/HTTPS 代理
 - **自定义提示词**（可选）：对 AI 输出的额外要求
 
-### 2. 处理文档
+### 3. 处理文档
 
 ```bash
 # 处理文档（会覆盖原文件）
@@ -69,7 +82,7 @@ report-killer process input.docx -o output.docx
 report-killer process input.docx --prompt "输出内容要简洁，不超过100字"
 ```
 
-### 3. 测试
+### 4. 测试
 
 使用项目提供的测试文档进行测试：
 
@@ -79,7 +92,7 @@ report-killer test
 
 测试结果会保存到 `documents/test_ai_doc_output.docx`。
 
-### 4. 查看配置
+### 5. 查看配置
 
 ```bash
 report-killer info
