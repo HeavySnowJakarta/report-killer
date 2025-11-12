@@ -11,16 +11,17 @@ from pathlib import Path
 class InsertionPoint:
     """Represents a point in the document where content should be inserted."""
     
-    def __init__(self, para_index: int, point_type: str, description: str):
+    def __init__(self, para_index: int, description: str, context_before: str = "", context_after: str = ""):
         self.para_index = para_index
-        self.point_type = point_type  # 'question', 'requirement', 'section'
         self.description = description
+        self.context_before = context_before
+        self.context_after = context_after
         self.filled = False
         self.content = []
     
     def __repr__(self):
         status = "✓" if self.filled else "○"
-        return f"{status} [{self.point_type}] Para {self.para_index}: {self.description[:50]}..."
+        return f"{status} Para {self.para_index}: {self.description[:50]}..."
 
 
 class DocxHandler:
@@ -55,75 +56,43 @@ class DocxHandler:
         
         return "\n".join(content)
     
-    def analyze_structure(self) -> Dict:
-        """Analyze document structure to find all insertion points."""
+    def get_paragraphs_with_indices(self) -> List[Tuple[int, str]]:
+        """Get all paragraphs with their indices."""
         if not self.doc:
             self.load()
         
-        structure = {
-            "paragraphs": [],
-            "questions": [],
-            "requirements": [],
-            "sections": [],
-        }
-        
-        self.insertion_points = []
-        
+        result = []
         for idx, para in enumerate(self.doc.paragraphs):
             text = para.text.strip()
-            if not text:
-                continue
-            
-            para_info = {
-                "index": idx,
-                "text": text,
-                "style": para.style.name if para.style else "Normal",
-            }
-            
-            # Detect questions (lines ending with ？ or ?)
-            if text.endswith("？") or text.endswith("?"):
-                para_info["is_question"] = True
-                structure["questions"].append(para_info)
-                
-                # Always mark questions as insertion points
-                # We need to check if the answer after it is sufficient
-                point = InsertionPoint(idx, "question", text)
-                self.insertion_points.append(point)
-            
-            # Detect numbered requirements like (1), (2), etc.
-            if re.match(r'^\(\d+\)\s*$', text):
-                para_info["is_requirement"] = True
-                structure["requirements"].append(para_info)
-                
-                # Short numbered items need elaboration
-                point = InsertionPoint(idx, "requirement", text)
-                self.insertion_points.append(point)
-            
-            # Detect section requirements like "1、实验报告需要包含以下几个部分"
-            elif re.match(r'^\d+[、．]', text) and len(text) < 150:
-                para_info["is_section_header"] = True
-                structure["requirements"].append(para_info)
-                
-                # These often need subsection content
-                if "需要" in text or "包含" in text or "要求" in text:
-                    point = InsertionPoint(idx, "section", text)
-                    self.insertion_points.append(point)
-            
-            # Detect section headers (五、六、etc.)
-            if re.match(r'^[一二三四五六七八九十]+、', text):
-                para_info["is_section"] = True
-                structure["sections"].append(para_info)
-            
-            structure["paragraphs"].append(para_info)
+            if text:
+                result.append((idx, text))
         
-        return structure
+        return result
     
-    def find_all_insertion_points(self) -> List[InsertionPoint]:
-        """Find all points where content needs to be inserted."""
-        if not self.insertion_points:
-            self.analyze_structure()
+    def get_context_around_index(self, para_index: int, before: int = 5, after: int = 5) -> Tuple[str, str]:
+        """Get context before and after a paragraph index."""
+        if not self.doc:
+            self.load()
         
-        return self.insertion_points
+        before_text = []
+        after_text = []
+        
+        for i in range(max(0, para_index - before), para_index):
+            if i < len(self.doc.paragraphs):
+                text = self.doc.paragraphs[i].text.strip()
+                if text:
+                    before_text.append(text)
+        
+        for i in range(para_index + 1, min(len(self.doc.paragraphs), para_index + after + 1)):
+            text = self.doc.paragraphs[i].text.strip()
+            if text:
+                after_text.append(text)
+        
+        return "\n".join(before_text), "\n".join(after_text)
+    
+    def set_insertion_points(self, points: List[InsertionPoint]):
+        """Set the insertion points from LLM analysis."""
+        self.insertion_points = points
     
     def insert_paragraph_after(self, para_index: int, text: str, style: Optional[str] = None):
         """Insert a new paragraph after the specified paragraph."""
@@ -181,18 +150,6 @@ class DocxHandler:
             for run in label_para.runs:
                 run.font.italic = True
                 run.font.size = Pt(9)
-    
-    def insert_table_after(self, para_index: int, rows: int, cols: int):
-        """Insert a table after the specified paragraph."""
-        if not self.doc:
-            self.load()
-        
-        # python-docx doesn't have direct insert_table_after
-        # We'll add to the end and then move elements
-        table = self.doc.add_table(rows=rows, cols=cols)
-        table.style = 'Light Grid Accent 1'
-        
-        return table
     
     def save(self, output_path: Optional[str] = None):
         """Save the document."""

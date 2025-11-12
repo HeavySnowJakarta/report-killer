@@ -1,4 +1,4 @@
-"""AI agent for processing documents with stdio test mode support."""
+"""AI agent for processing documents with LLM-based insertion point detection."""
 
 import os
 import sys
@@ -18,7 +18,7 @@ console = Console()
 
 
 class ReportAgent:
-    """AI agent that processes Word documents with code execution capability."""
+    """AI agent that processes Word documents with LLM-based analysis."""
     
     def __init__(self, config: Config, test_mode: bool = False):
         """Initialize the agent with configuration."""
@@ -100,29 +100,29 @@ class ReportAgent:
             return False
         
         # Extract content
-        content = handler.get_text_content()
-        console.print(f"[green]Document loaded successfully[/green] ({len(content)} characters)")
+        full_content = handler.get_text_content()
+        console.print(f"[green]Document loaded successfully[/green] ({len(full_content)} characters)")
         
-        # Analyze structure
-        structure = handler.analyze_structure()
-        insertion_points = handler.find_all_insertion_points()
-        
-        console.print(f"\n[cyan]Found {len(insertion_points)} insertion points:[/cyan]")
-        for point in insertion_points:
-            console.print(f"  {point}")
+        # Use LLM to detect insertion points
+        console.print(f"\n[cyan]Detecting insertion points with LLM...[/cyan]")
+        insertion_points = self._detect_insertion_points_with_llm(handler, full_content)
         
         if not insertion_points:
             console.print("[yellow]No insertion points found. Document may already be complete.[/yellow]")
             return True
         
+        console.print(f"\n[cyan]Found {len(insertion_points)} insertion points:[/cyan]")
+        for point in insertion_points:
+            console.print(f"  {point}")
+        
         # Process each insertion point
         console.print(f"\n[cyan]Processing insertion points...[/cyan]")
         
-        for point in insertion_points:
-            console.print(f"\n[bold]Processing:[/bold] {point.description[:60]}...")
+        for i, point in enumerate(insertion_points, 1):
+            console.print(f"\n[bold]{i}/{len(insertion_points)}. Processing:[/bold] {point.description[:60]}...")
             
-            # Generate content for this point
-            generated = self._generate_content_for_point(point, content, structure)
+            # Generate content for this point with full context
+            generated = self._generate_content_for_point(point, full_content)
             
             if generated:
                 # Insert into document
@@ -150,13 +150,85 @@ class ReportAgent:
         handler.save(save_path)
         console.print(f"\n[green]✓ Document saved to:[/green] {save_path}")
         
-        return True
+        return status['remaining'] == 0
     
-    def _generate_content_for_point(self, point: InsertionPoint, 
-                                    full_content: str, structure: dict) -> List[str]:
-        """Generate content for a specific insertion point."""
+    def _detect_insertion_points_with_llm(self, handler: DocxHandler, full_content: str) -> List[InsertionPoint]:
+        """Use LLM to detect insertion points in the document."""
+        paragraphs = handler.get_paragraphs_with_indices()
+        
+        # Build prompt for LLM to analyze insertion points
+        prompt = f"""请分析以下Word文档，找出所有需要填写内容的位置。
+
+文档内容：
+{full_content}
+
+所有段落（带索引）：
+"""
+        for idx, text in paragraphs:
+            prompt += f"{idx}: {text}\n"
+        
+        prompt += """
+请列出所有需要填写内容的位置，对于每个位置，提供：
+1. 段落索引（para_index）
+2. 描述（description）- 说明这个位置需要填写什么
+
+以JSON格式返回，格式如下：
+{
+  "insertion_points": [
+    {
+      "para_index": 22,
+      "description": "需要实现八数码问题的BFS、DFS和A*算法"
+    }
+  ]
+}
+
+注意：
+- 只标注真正需要填写的位置（如实验内容、代码实现要求、未回答的问题等）
+- 已经有答案的问题不要标注
+- 忽略标题、说明性段落
+"""
+        
+        # Get LLM response
+        if self.test_mode:
+            response = self._stdio_interaction(prompt)
+        else:
+            response = self._api_interaction(prompt)
+        
+        # Parse response
+        points = self._parse_insertion_points_response(response, handler)
+        handler.set_insertion_points(points)
+        
+        return points
+    
+    def _parse_insertion_points_response(self, response: str, handler: DocxHandler) -> List[InsertionPoint]:
+        """Parse LLM response to extract insertion points."""
+        points = []
+        
+        try:
+            # Try to extract JSON
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                
+                if "insertion_points" in data:
+                    for item in data["insertion_points"]:
+                        para_index = item.get("para_index")
+                        description = item.get("description", "")
+                        
+                        if para_index is not None:
+                            # Get context around this point
+                            before, after = handler.get_context_around_index(para_index)
+                            point = InsertionPoint(para_index, description, before, after)
+                            points.append(point)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to parse insertion points: {e}[/yellow]")
+        
+        return points
+    
+    def _generate_content_for_point(self, point: InsertionPoint, full_content: str) -> List[str]:
+        """Generate content for a specific insertion point with full context."""
         # Build context-aware prompt
-        prompt = self._build_prompt_for_point(point, full_content, structure)
+        prompt = self._build_prompt_for_point(point, full_content)
         
         # Get AI response
         if self.test_mode:
@@ -168,7 +240,7 @@ class ReportAgent:
             return []
         
         # Parse response into paragraphs
-        paragraphs = self._parse_response(response, point)
+        paragraphs = self._parse_response(response)
         
         # Check if code execution is needed
         if "代码" in point.description or "程序" in point.description or "实现" in point.description:
@@ -179,22 +251,32 @@ class ReportAgent:
         
         return paragraphs
     
-    def _build_prompt_for_point(self, point: InsertionPoint, 
-                                full_content: str, structure: dict) -> str:
-        """Build a focused prompt for a specific insertion point."""
+    def _build_prompt_for_point(self, point: InsertionPoint, full_content: str) -> str:
+        """Build a focused prompt with full context for a specific insertion point."""
         base_prompt = f"""你是一个专业的学术报告撰写助手。
 
-当前需要填写的内容：
-{point.description}
+=== 完整文档内容 ===
+{full_content}
 
-文档上下文：
-{full_content[:2000]}
+=== 当前需要填写的位置 ===
+段落索引：{point.para_index}
+需求描述：{point.description}
 
-请提供详细、专业的答案。注意：
-1. 如果需要代码，请提供完整可运行的代码
-2. 如果需要实验结果，请说明如何获得
-3. 答案要符合学术规范
-4. 不要使用Markdown格式标记（如**、#等）
+=== 上下文 ===
+前文：
+{point.context_before}
+
+当前位置需要填写的内容
+
+后文：
+{point.context_after}
+
+请为这个位置提供详细、专业的内容。要求：
+1. 内容要详实、有深度，符合学术规范
+2. 如果需要代码，请提供完整可运行的代码（使用```language标记）
+3. 如果需要实验结果，请说明实验设计和预期结果
+4. 如果需要分析对比，请提供具体数据和图表说明
+5. 不要使用Markdown格式的加粗（**）、标题（#）、列表符号（-、*）
 """
         
         if self.config.custom_prompt:
@@ -204,6 +286,7 @@ class ReportAgent:
         available_langs = self.executor.get_available_languages()
         if available_langs:
             base_prompt += f"\n\n可用的编程语言：{', '.join(available_langs)}"
+            base_prompt += "\n如果需要代码，请优先使用可用的语言。"
         
         return base_prompt
     
@@ -213,7 +296,7 @@ class ReportAgent:
         console.print("[bold cyan]STDIO TEST MODE - Simulating LLM[/bold cyan]")
         console.print("="*70, style="cyan")
         
-        console.print(Panel(prompt, title="Prompt to LLM", border_style="blue"))
+        console.print(Panel(prompt, title="Prompt to LLM", border_style="blue", expand=False))
         
         console.print("\n[yellow]Enter response (end with '===END==='):[/yellow]")
         
@@ -229,9 +312,7 @@ class ReportAgent:
         
         response = "\n".join(lines)
         
-        console.print("\n[green]Response received:[/green]")
-        console.print(Panel(response[:200] + "..." if len(response) > 200 else response, 
-                          border_style="green"))
+        console.print("\n[green]Response received[/green]")
         
         return response
     
@@ -247,7 +328,7 @@ class ReportAgent:
                 "messages": [
                     {"role": "user", "content": prompt}
                 ],
-                "max_tokens": 4000,
+                "max_tokens": 8000,
                 "temperature": 0.7,
             }
             
@@ -256,7 +337,7 @@ class ReportAgent:
                 headers=self.headers,
                 json=payload,
                 proxies=self.proxies,
-                timeout=120,
+                timeout=180,
             )
             
             response.raise_for_status()
@@ -268,9 +349,8 @@ class ReportAgent:
             console.print(f"[red]Error calling AI API:[/red] {e}")
             return ""
     
-    def _parse_response(self, response: str, point: InsertionPoint) -> List[str]:
+    def _parse_response(self, response: str) -> List[str]:
         """Parse AI response into paragraphs."""
-        # Split by double newlines
         paragraphs = []
         
         # First, try to clean up the response
@@ -321,12 +401,12 @@ class ReportAgent:
                 
                 if success:
                     console.print(f"[green]✓ Execution successful[/green]")
-                    results.append(f"代码执行结果：\n{output}")
+                    results.append(f"程序执行结果：\n{output}")
                 else:
                     console.print(f"[red]✗ Execution failed[/red]")
-                    results.append(f"代码执行失败：\n{output}")
+                    results.append(f"程序执行失败：\n{output}")
             else:
                 console.print(f"[yellow]⚠ Cannot execute {language}: {message}[/yellow]")
-                results.append(f"注意：需要{language}环境，但当前系统不可用。{message}")
+                results.append(f"注意：需要{language}环境。{message}")
         
         return results
