@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Tuple
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 import re
 from pathlib import Path
 
@@ -18,6 +19,7 @@ class InsertionPoint:
         self.context_after = context_after
         self.filled = False
         self.content = []
+        self.actual_insert_index = para_index  # Track where we actually inserted
     
     def __repr__(self):
         status = "✓" if self.filled else "○"
@@ -117,39 +119,152 @@ class DocxHandler:
         
         return new_para
     
-    def insert_content_at_point(self, point: InsertionPoint, content: List[str]):
-        """Insert content at the specified insertion point."""
+    def insert_code_block(self, para_index: int, code: str, language: str = "") -> int:
+        """Insert a code block with proper formatting. Returns number of paragraphs inserted."""
         if not self.doc:
             self.load()
         
-        # Insert each piece of content as a new paragraph
-        for i, text in enumerate(content):
-            # Insert after the insertion point paragraph
-            insert_index = point.para_index + i
-            self.insert_paragraph_after(insert_index, text)
+        inserted = 0
         
-        point.filled = True
-        point.content = content
-    
-    def insert_code_block(self, para_index: int, code: str, language: str = ""):
-        """Insert a code block with proper formatting."""
-        if not self.doc:
-            self.load()
+        # Split code into lines to preserve line breaks
+        code_lines = code.split('\n')
         
-        # Add code as a paragraph with monospace font
-        code_para = self.insert_paragraph_after(para_index, code)
-        
-        # Format as code
-        for run in code_para.runs:
-            run.font.name = 'Consolas'
-            run.font.size = Pt(9)
-        
-        # Optionally add language label
+        # Insert language label if provided
         if language:
-            label_para = self.insert_paragraph_after(para_index, f"[{language}]")
+            label_para = self.insert_paragraph_after(para_index, f"[{language} 代码]")
             for run in label_para.runs:
                 run.font.italic = True
                 run.font.size = Pt(9)
+            inserted += 1
+        
+        # Insert code with line breaks preserved
+        for line in code_lines:
+            code_para = self.insert_paragraph_after(para_index + inserted, line if line.strip() else " ")
+            
+            # Format as code
+            for run in code_para.runs:
+                run.font.name = 'Consolas'
+                run.font.size = Pt(9)
+                # Use monospace font for Chinese characters too
+                run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Consolas')
+            
+            inserted += 1
+        
+        return inserted
+    
+    def insert_table(self, para_index: int, data: List[List[str]], headers: Optional[List[str]] = None) -> int:
+        """Insert a table after the specified paragraph. Returns 1."""
+        if not self.doc:
+            self.load()
+        
+        rows = len(data) + (1 if headers else 0)
+        cols = len(headers) if headers else len(data[0]) if data else 0
+        
+        if rows == 0 or cols == 0:
+            return 0
+        
+        # Create table
+        if para_index >= len(self.doc.paragraphs):
+            table = self.doc.add_table(rows=rows, cols=cols)
+        else:
+            # Insert table after paragraph
+            target_para = self.doc.paragraphs[para_index]
+            table = self.doc.add_table(rows=rows, cols=cols)
+            # Move table to correct position
+            target_para._element.addnext(table._element)
+        
+        table.style = 'Light Grid Accent 1'
+        
+        # Fill headers
+        if headers:
+            for col_idx, header in enumerate(headers):
+                cell = table.rows[0].cells[col_idx]
+                cell.text = header
+                # Make header bold
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.bold = True
+        
+        # Fill data
+        start_row = 1 if headers else 0
+        for row_idx, row_data in enumerate(data):
+            for col_idx, cell_data in enumerate(row_data):
+                table.rows[start_row + row_idx].cells[col_idx].text = str(cell_data)
+        
+        return 1  # Table counts as 1 element
+    
+    def insert_image(self, para_index: int, image_path: str, width_inches: float = 5.0) -> int:
+        """Insert an image after the specified paragraph. Returns 1."""
+        if not self.doc:
+            self.load()
+        
+        if para_index >= len(self.doc.paragraphs):
+            para = self.doc.add_paragraph()
+        else:
+            target_para = self.doc.paragraphs[para_index]
+            para = target_para.insert_paragraph_before()
+            target_para._element.addnext(para._element)
+        
+        run = para.add_run()
+        run.add_picture(str(image_path), width=Inches(width_inches))
+        
+        return 1
+    
+    def insert_content_at_point(self, point: InsertionPoint, content: List[dict]):
+        """
+        Insert content at the specified insertion point.
+        
+        Content is a list of dicts with:
+        - type: 'text', 'code', 'table', 'image'
+        - data: the actual content
+        - language: (for code) programming language
+        - headers: (for table) optional headers
+        """
+        if not self.doc:
+            self.load()
+        
+        current_index = point.para_index
+        inserted_total = 0
+        
+        for item in content:
+            item_type = item.get('type', 'text')
+            
+            if item_type == 'text':
+                text = item.get('data', '')
+                self.insert_paragraph_after(current_index, text)
+                inserted_total += 1
+                current_index += 1
+                
+            elif item_type == 'code':
+                code = item.get('data', '')
+                language = item.get('language', '')
+                inserted = self.insert_code_block(current_index, code, language)
+                inserted_total += inserted
+                current_index += inserted
+                
+            elif item_type == 'table':
+                data = item.get('data', [])
+                headers = item.get('headers')
+                inserted = self.insert_table(current_index, data, headers)
+                inserted_total += inserted
+                current_index += inserted
+                
+            elif item_type == 'image':
+                image_path = item.get('data', '')
+                if Path(image_path).exists():
+                    width = item.get('width', 5.0)
+                    inserted = self.insert_image(current_index, image_path, width)
+                    inserted_total += inserted
+                    current_index += inserted
+        
+        point.filled = True
+        point.content = content
+        point.actual_insert_index = current_index
+        
+        # Update subsequent insertion points' indices
+        for other_point in self.insertion_points:
+            if other_point.para_index > point.para_index and not other_point.filled:
+                other_point.para_index += inserted_total
     
     def save(self, output_path: Optional[str] = None):
         """Save the document."""

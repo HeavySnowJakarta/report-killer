@@ -30,8 +30,10 @@ class CodeExecutor:
         # C/C++ compilers
         tools['gcc'] = shutil.which('gcc') is not None
         tools['g++'] = shutil.which('g++') is not None
-        tools['cl'] = shutil.which('cl') is not None  # MSVC
         tools['clang'] = shutil.which('clang') is not None
+        
+        # Visual Studio cl.exe detection (Windows)
+        tools['cl'] = self._detect_visual_studio()
         
         # Python
         tools['python'] = shutil.which('python') is not None or shutil.which('python3') is not None
@@ -46,11 +48,42 @@ class CodeExecutor:
         
         return tools
     
+    def _detect_visual_studio(self) -> bool:
+        """Detect Visual Studio cl.exe compiler on Windows."""
+        if self.system != 'Windows':
+            return False
+        
+        # Check if cl.exe is directly available
+        if shutil.which('cl') is not None:
+            return True
+        
+        # Try to find Visual Studio installations
+        vs_paths = [
+            r"C:\Program Files\Microsoft Visual Studio",
+            r"C:\Program Files (x86)\Microsoft Visual Studio",
+        ]
+        
+        for vs_path in vs_paths:
+            if Path(vs_path).exists():
+                # Look for cl.exe in typical locations
+                for version in ['2022', '2019', '2017']:
+                    for edition in ['Community', 'Professional', 'Enterprise']:
+                        cl_path = Path(vs_path) / version / edition / "VC" / "Tools" / "MSVC"
+                        if cl_path.exists():
+                            # Find the latest MSVC version
+                            for msvc_version in sorted(cl_path.iterdir(), reverse=True):
+                                cl_exe = msvc_version / "bin" / "Hostx64" / "x64" / "cl.exe"
+                                if cl_exe.exists():
+                                    self.cl_path = str(cl_exe)
+                                    return True
+        
+        return False
+    
     def get_available_languages(self) -> List[str]:
         """Get list of languages that can be executed."""
         languages = []
         
-        if self.available_tools.get('gcc') or self.available_tools.get('g++'):
+        if self.available_tools.get('gcc') or self.available_tools.get('g++') or self.available_tools.get('cl'):
             languages.append('C')
             languages.append('C++')
         
@@ -75,6 +108,8 @@ class CodeExecutor:
         if language in ['c', 'c++', 'cpp']:
             if self.available_tools.get('gcc') or self.available_tools.get('g++'):
                 return True, "gcc/g++ available"
+            elif self.available_tools.get('cl'):
+                return True, "Visual Studio cl.exe available"
             else:
                 return False, "No C/C++ compiler found. Please install gcc/g++ or Visual Studio."
         
@@ -111,28 +146,49 @@ class CodeExecutor:
             output_file = self.workspace / output_file.name
         
         # Determine compiler
-        if source_file.suffix in ['.cpp', '.cc', '.cxx']:
-            compiler = 'g++' if self.available_tools.get('g++') else 'gcc'
+        if self.available_tools.get('cl'):
+            # Use Visual Studio cl.exe
+            compiler = getattr(self, 'cl_path', 'cl')
+            try:
+                result = subprocess.run(
+                    [compiler, str(source_file), f'/Fe:{str(output_file)}'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                
+                if result.returncode == 0:
+                    return True, f"Compiled successfully to {output_file.name}"
+                else:
+                    return False, f"Compilation error:\n{result.stderr}"
+            except subprocess.TimeoutExpired:
+                return False, "Compilation timed out"
+            except Exception as e:
+                return False, f"Compilation error: {e}"
         else:
-            compiler = 'gcc' if self.available_tools.get('gcc') else 'g++'
-        
-        try:
-            result = subprocess.run(
-                [compiler, str(source_file), '-o', str(output_file)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            
-            if result.returncode == 0:
-                return True, f"Compiled successfully to {output_file.name}"
+            # Use gcc/g++
+            if source_file.suffix in ['.cpp', '.cc', '.cxx']:
+                compiler = 'g++' if self.available_tools.get('g++') else 'gcc'
             else:
-                return False, f"Compilation error:\n{result.stderr}"
-        
-        except subprocess.TimeoutExpired:
-            return False, "Compilation timed out"
-        except Exception as e:
-            return False, f"Compilation error: {e}"
+                compiler = 'gcc' if self.available_tools.get('gcc') else 'g++'
+            
+            try:
+                result = subprocess.run(
+                    [compiler, str(source_file), '-o', str(output_file)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                
+                if result.returncode == 0:
+                    return True, f"Compiled successfully to {output_file.name}"
+                else:
+                    return False, f"Compilation error:\n{result.stderr}"
+            
+            except subprocess.TimeoutExpired:
+                return False, "Compilation timed out"
+            except Exception as e:
+                return False, f"Compilation error: {e}"
     
     def run_executable(self, executable: Path, args: List[str] = None, input_data: str = None) -> Tuple[bool, str]:
         """Run a compiled executable."""

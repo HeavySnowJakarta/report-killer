@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Tuple
 from .config import Config
 from .docx_handler import DocxHandler, InsertionPoint
 from .code_executor import CodeExecutor
+from .chart_generator import ChartGenerator
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.panel import Panel
@@ -41,6 +42,9 @@ class ReportAgent:
         
         # Initialize code executor
         self.executor = CodeExecutor()
+        
+        # Initialize chart generator
+        self.chart_generator = ChartGenerator()
     
     def check_environment(self) -> dict:
         """Check if the required environment is available."""
@@ -225,7 +229,7 @@ class ReportAgent:
         
         return points
     
-    def _generate_content_for_point(self, point: InsertionPoint, full_content: str) -> List[str]:
+    def _generate_content_for_point(self, point: InsertionPoint, full_content: str) -> List[dict]:
         """Generate content for a specific insertion point with full context."""
         # Build context-aware prompt
         prompt = self._build_prompt_for_point(point, full_content)
@@ -239,17 +243,103 @@ class ReportAgent:
         if not response:
             return []
         
-        # Parse response into paragraphs
-        paragraphs = self._parse_response(response)
+        # Parse response into structured content
+        content_items = self._parse_response_to_structured_content(response, point)
         
-        # Check if code execution is needed
-        if "代码" in point.description or "程序" in point.description or "实现" in point.description:
-            # Try to extract and execute code
-            code_results = self._extract_and_execute_code(response)
-            if code_results:
-                paragraphs.extend(code_results)
+        return content_items
+    
+    def _parse_response_to_structured_content(self, response: str, point: InsertionPoint) -> List[dict]:
+        """Parse AI response into structured content (text, code, tables, images)."""
+        content = []
         
-        return paragraphs
+        # Remove code blocks and process them separately
+        code_blocks = []
+        code_pattern = r'```(\w+)?\n(.*?)```'
+        
+        def replace_code_block(match):
+            language = match.group(1) or 'python'
+            code = match.group(2)
+            code_blocks.append((language.lower(), code))
+            return f"<<<CODE_BLOCK_{len(code_blocks)-1}>>>"
+        
+        # Replace code blocks with placeholders
+        text_content = re.sub(code_pattern, replace_code_block, response, flags=re.DOTALL)
+        
+        # Parse text into paragraphs
+        lines = text_content.strip().split('\n')
+        current_para = []
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Check for code block placeholder
+            code_match = re.match(r'<<<CODE_BLOCK_(\d+)>>>', line)
+            if code_match:
+                # Save current paragraph
+                if current_para:
+                    para_text = ' '.join(current_para)
+                    # Remove markdown formatting
+                    para_text = re.sub(r'\*\*([^*]+)\*\*', r'\1', para_text)
+                    para_text = re.sub(r'\*([^*]+)\*', r'\1', para_text)
+                    content.append({'type': 'text', 'data': para_text})
+                    current_para = []
+                
+                # Process code block
+                code_idx = int(code_match.group(1))
+                if code_idx < len(code_blocks):
+                    language, code = code_blocks[code_idx]
+                    
+                    # Check if it's a chart generation code
+                    if language == 'python' and ('plt.' in code or 'matplotlib' in code):
+                        # Generate chart
+                        chart_path = self.chart_generator.parse_chart_from_code(code)
+                        if chart_path:
+                            console.print(f"[green]✓ Generated chart: {chart_path}[/green]")
+                            content.append({'type': 'image', 'data': chart_path, 'width': 5.0})
+                            content.append({'type': 'code', 'data': code, 'language': language})
+                        else:
+                            console.print(f"[yellow]⚠ Failed to generate chart[/yellow]")
+                            content.append({'type': 'code', 'data': code, 'language': language})
+                    else:
+                        # Regular code block
+                        content.append({'type': 'code', 'data': code, 'language': language})
+                        
+                        # Execute if applicable
+                        can_execute, message = self.executor.can_execute_language(language)
+                        if can_execute and ("代码" in point.description or "程序" in point.description or "实现" in point.description):
+                            console.print(f"\n[cyan]Executing {language} code...[/cyan]")
+                            success, output, code_file = self.executor.execute_code(language, code)
+                            
+                            if success:
+                                console.print(f"[green]✓ Execution successful[/green]")
+                                content.append({'type': 'text', 'data': f"程序执行结果：\n{output}"})
+                            else:
+                                console.print(f"[red]✗ Execution failed[/red]")
+                                content.append({'type': 'text', 'data': f"程序执行失败：\n{output}"})
+                continue
+            
+            # Skip empty lines or markdown headers
+            if not line or line.startswith('#'):
+                if current_para:
+                    para_text = ' '.join(current_para)
+                    para_text = re.sub(r'\*\*([^*]+)\*\*', r'\1', para_text)
+                    para_text = re.sub(r'\*([^*]+)\*', r'\1', para_text)
+                    content.append({'type': 'text', 'data': para_text})
+                    current_para = []
+                continue
+            
+            # Remove markdown formatting
+            line = re.sub(r'\*\*([^*]+)\*\*', r'\1', line)
+            line = re.sub(r'\*([^*]+)\*', r'\1', line)
+            
+            current_para.append(line)
+        
+        # Add last paragraph
+        if current_para:
+            para_text = ' '.join(current_para)
+            content.append({'type': 'text', 'data': para_text})
+        
+        return content
     
     def _build_prompt_for_point(self, point: InsertionPoint, full_content: str) -> str:
         """Build a focused prompt with full context for a specific insertion point."""
