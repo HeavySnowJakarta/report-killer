@@ -6,6 +6,7 @@ import requests
 import json
 import re
 from typing import Optional, List, Dict, Tuple
+from pathlib import Path
 from .config import Config
 from .docx_handler import DocxHandler, InsertionPoint
 from .code_executor import CodeExecutor
@@ -252,6 +253,17 @@ class ReportAgent:
         """Parse AI response into structured content (text, code, tables, images)."""
         content = []
         
+        # Extract and process Markdown tables first
+        tables = []
+        table_pattern = r'\|(.+)\|[\r\n]+\|[\s:|-]+\|[\r\n]+((?:\|.+\|[\r\n]+)*)'
+        
+        def replace_table(match):
+            tables.append(match.group(0))
+            return f"<<<TABLE_{len(tables)-1}>>>"
+        
+        # Replace tables with placeholders
+        response = re.sub(table_pattern, replace_table, response)
+        
         # Remove code blocks and process them separately
         code_blocks = []
         code_pattern = r'```(\w+)?\n(.*?)```'
@@ -271,6 +283,27 @@ class ReportAgent:
         
         for line in lines:
             line = line.strip()
+            
+            # Check for table placeholder
+            table_match = re.match(r'<<<TABLE_(\d+)>>>', line)
+            if table_match:
+                # Save current paragraph
+                if current_para:
+                    para_text = ' '.join(current_para)
+                    # Remove markdown formatting
+                    para_text = re.sub(r'\*\*([^*]+)\*\*', r'\1', para_text)
+                    para_text = re.sub(r'\*([^*]+)\*', r'\1', para_text)
+                    content.append({'type': 'text', 'data': para_text})
+                    current_para = []
+                
+                # Parse table
+                table_idx = int(table_match.group(1))
+                if table_idx < len(tables):
+                    table_data = self._parse_markdown_table(tables[table_idx])
+                    if table_data:
+                        headers, rows = table_data
+                        content.append({'type': 'table', 'data': rows, 'headers': headers})
+                continue
             
             # Check for code block placeholder
             code_match = re.match(r'<<<CODE_BLOCK_(\d+)>>>', line)
@@ -301,21 +334,22 @@ class ReportAgent:
                             console.print(f"[yellow]⚠ Failed to generate chart[/yellow]")
                             content.append({'type': 'code', 'data': code, 'language': language})
                     else:
-                        # Regular code block
-                        content.append({'type': 'code', 'data': code, 'language': language})
-                        
-                        # Execute if applicable
+                        # Regular code block - execute with retry logic
                         can_execute, message = self.executor.can_execute_language(language)
                         if can_execute and ("代码" in point.description or "程序" in point.description or "实现" in point.description):
-                            console.print(f"\n[cyan]Executing {language} code...[/cyan]")
-                            success, output, code_file = self.executor.execute_code(language, code)
+                            success, output, code_file = self._execute_code_with_retry(language, code, point)
+                            
+                            # Only add code block, not execution results (those go to terminal)
+                            content.append({'type': 'code', 'data': code, 'language': language})
                             
                             if success:
-                                console.print(f"[green]✓ Execution successful[/green]")
-                                content.append({'type': 'text', 'data': f"程序执行结果：\n{output}"})
+                                console.print(f"[green]✓ Code execution successful[/green]")
+                                console.print(f"[cyan]Output:[/cyan]\n{output}")
                             else:
-                                console.print(f"[red]✗ Execution failed[/red]")
-                                content.append({'type': 'text', 'data': f"程序执行失败：\n{output}"})
+                                console.print(f"[red]✗ Code execution failed after retries[/red]")
+                                console.print(f"[yellow]Error:[/yellow]\n{output}")
+                        else:
+                            content.append({'type': 'code', 'data': code, 'language': language})
                 continue
             
             # Skip empty lines or markdown headers
@@ -340,6 +374,91 @@ class ReportAgent:
             content.append({'type': 'text', 'data': para_text})
         
         return content
+    
+    def _parse_markdown_table(self, table_text: str) -> Optional[Tuple[List[str], List[List[str]]]]:
+        """Parse a Markdown table into headers and data rows."""
+        try:
+            lines = [line.strip() for line in table_text.strip().split('\n') if line.strip()]
+            
+            if len(lines) < 2:
+                return None
+            
+            # Parse header row
+            header_line = lines[0]
+            headers = [cell.strip() for cell in header_line.split('|') if cell.strip()]
+            
+            # Skip separator row (line 1)
+            # Parse data rows
+            rows = []
+            for line in lines[2:]:
+                cells = [cell.strip() for cell in line.split('|') if cell.strip()]
+                if cells:
+                    rows.append(cells)
+            
+            return headers, rows
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to parse Markdown table: {e}[/yellow]")
+            return None
+    
+    def _execute_code_with_retry(self, language: str, code: str, point: InsertionPoint) -> Tuple[bool, str, Optional[Path]]:
+        """
+        Execute code with retry mechanism.
+        If execution fails, ask LLM to fix the code and retry.
+        Returns: (success, output, code_file_path)
+        """
+        max_retries = self.config.max_code_retries
+        current_code = code
+        
+        for attempt in range(max_retries):
+            console.print(f"\n[cyan]Executing {language} code (attempt {attempt + 1}/{max_retries})...[/cyan]")
+            
+            success, output, code_file = self.executor.execute_code(language, current_code)
+            
+            if success:
+                return True, output, code_file
+            
+            # Execution failed
+            console.print(f"[red]✗ Execution failed (attempt {attempt + 1}/{max_retries})[/red]")
+            console.print(f"[yellow]Error:[/yellow]\n{output}")
+            
+            # If we have more retries, ask LLM to fix the code
+            if attempt < max_retries - 1:
+                console.print(f"[cyan]Asking LLM to fix the code...[/cyan]")
+                
+                fix_prompt = f"""之前生成的代码执行失败了。请修复这个代码。
+
+原始需求：
+{point.description}
+
+之前的代码：
+```{language}
+{current_code}
+```
+
+错误信息：
+{output}
+
+请提供修复后的完整代码（使用```{language}标记），只输出代码不要其他说明。"""
+                
+                if self.test_mode:
+                    fixed_response = self._stdio_interaction(fix_prompt)
+                else:
+                    fixed_response = self._api_interaction(fix_prompt)
+                
+                # Extract fixed code
+                code_pattern = r'```(?:\w+)?\n(.*?)```'
+                match = re.search(code_pattern, fixed_response, re.DOTALL)
+                if match:
+                    current_code = match.group(1)
+                    console.print(f"[green]✓ Received fixed code from LLM[/green]")
+                else:
+                    console.print(f"[yellow]⚠ LLM response did not contain code block, using original[/yellow]")
+            else:
+                # Final attempt failed
+                console.print(f"[red]✗ Code execution failed after {max_retries} attempts[/red]")
+                console.print(f"[yellow]LLM was unable to fix the issue. Please check the code manually.[/yellow]")
+        
+        return False, output, code_file
     
     def _build_prompt_for_point(self, point: InsertionPoint, full_content: str) -> str:
         """Build a focused prompt with full context for a specific insertion point."""

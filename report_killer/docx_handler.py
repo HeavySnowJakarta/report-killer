@@ -129,15 +129,7 @@ class DocxHandler:
         # Split code into lines to preserve line breaks
         code_lines = code.split('\n')
         
-        # Insert language label if provided
-        if language:
-            label_para = self.insert_paragraph_after(para_index, f"[{language} 代码]")
-            for run in label_para.runs:
-                run.font.italic = True
-                run.font.size = Pt(9)
-            inserted += 1
-        
-        # Insert code with line breaks preserved
+        # Insert code with line breaks preserved (no language label)
         for line in code_lines:
             code_para = self.insert_paragraph_after(para_index + inserted, line if line.strip() else " ")
             

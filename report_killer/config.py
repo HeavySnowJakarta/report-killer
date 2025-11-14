@@ -18,6 +18,7 @@ class Config:
     https_proxy: Optional[str] = None
     custom_prompt: str = ""
     documents_dir: str = "documents"
+    max_code_retries: int = 3
     
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "Config":
