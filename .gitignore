@@ -211,3 +211,9 @@ documents/
 workspace/
 .env
 config.json
+
+# uv
+uv.lock
+
+# inputs
+input/
