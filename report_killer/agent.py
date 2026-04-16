@@ -17,6 +17,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 console = Console()
+HEURISTIC_MARKER_PATTERN = re.compile(r'^\s*[（(]\s*\d+\s*[）)]\s*$')
+HEURISTIC_NUMBERED_LINE_PATTERN = re.compile(r'^\s*[（(]\s*\d+\s*[）)]')
 
 
 class ReportAgent:
@@ -216,24 +218,23 @@ class ReportAgent:
         return points
     
     def _detect_insertion_points_heuristic(self, handler: DocxHandler) -> List[InsertionPoint]:
-        """Heuristic fallback to detect likely unanswered insertion points."""
+        """Heuristic fallback for numbered sections and likely unresolved questions."""
         paragraphs = handler.get_paragraphs_with_indices()
         points: List[InsertionPoint] = []
         
-        marker_pattern = re.compile(r'^\s*[（(]?\d+[）)]\s*$')
-        numbered_line_pattern = re.compile(r'^\s*[（(]?\d+[）)]')
-        task_keywords = ("求解", "实现", "分析", "指出", "尝试", "解答", "列出", "说明", "比较", "改进")
-        
         def next_non_empty_text(start_pos: int) -> Optional[str]:
-            for _, t in paragraphs[start_pos + 1:]:
-                if t.strip():
-                    return t.strip()
+            for i in range(start_pos + 1, len(paragraphs)):
+                _, t = paragraphs[i]
+                stripped = t.strip()
+                if stripped:
+                    return stripped
             return None
         
         def looks_answer_like(text: str) -> bool:
+            """Check if a paragraph looks like an answer instead of a new question/task."""
             if not text:
                 return False
-            if numbered_line_pattern.match(text):
+            if HEURISTIC_NUMBERED_LINE_PATTERN.match(text):
                 return False
             if "？" in text or "?" in text:
                 return False
@@ -245,14 +246,14 @@ class ReportAgent:
                 continue
             
             include = False
-            if marker_pattern.match(current):
+            if HEURISTIC_MARKER_PATTERN.match(current):
+                include = True
+            elif HEURISTIC_NUMBERED_LINE_PATTERN.match(current):
                 include = True
             elif "？" in current or "?" in current:
                 nxt = next_non_empty_text(pos)
+                # If the next meaningful paragraph is not answer-like, treat this question as unresolved.
                 include = nxt is None or not looks_answer_like(nxt)
-            elif any(keyword in current for keyword in task_keywords):
-                include = True
-            
             if include:
                 before, after = handler.get_context_around_index(idx)
                 points.append(InsertionPoint(idx, current, before, after))
