@@ -160,12 +160,13 @@ class ReportAgent:
     def _detect_insertion_points_with_llm(self, handler: DocxHandler, full_content: str) -> List[InsertionPoint]:
         """Use LLM to detect insertion points in the document."""
         paragraphs = handler.get_paragraphs_with_indices()
+        paragraph_content = "\n".join(text for _, text in paragraphs)
         
         # Build prompt for LLM to analyze insertion points
         prompt = f"""请分析以下Word文档，找出所有需要填写内容的位置。
 
 文档内容：
-{full_content}
+{paragraph_content}
 
 所有段落（带索引）：
 """
@@ -201,7 +202,60 @@ class ReportAgent:
         
         # Parse response
         points = self._parse_insertion_points_response(response, handler)
+        heuristic_points = self._detect_insertion_points_heuristic(handler)
+        
+        # Merge LLM detection with heuristic detection for better robustness
+        point_map = {point.para_index: point for point in points}
+        for point in heuristic_points:
+            if point.para_index not in point_map:
+                point_map[point.para_index] = point
+        
+        points = sorted(point_map.values(), key=lambda p: p.para_index)
         handler.set_insertion_points(points)
+        
+        return points
+    
+    def _detect_insertion_points_heuristic(self, handler: DocxHandler) -> List[InsertionPoint]:
+        """Heuristic fallback to detect likely unanswered insertion points."""
+        paragraphs = handler.get_paragraphs_with_indices()
+        points: List[InsertionPoint] = []
+        
+        marker_pattern = re.compile(r'^\s*[（(]?\d+[）)]\s*$')
+        numbered_line_pattern = re.compile(r'^\s*[（(]?\d+[）)]')
+        task_keywords = ("求解", "实现", "分析", "指出", "尝试", "解答", "列出", "说明", "比较", "改进")
+        
+        def next_non_empty_text(start_pos: int) -> Optional[str]:
+            for _, t in paragraphs[start_pos + 1:]:
+                if t.strip():
+                    return t.strip()
+            return None
+        
+        def looks_answer_like(text: str) -> bool:
+            if not text:
+                return False
+            if numbered_line_pattern.match(text):
+                return False
+            if "？" in text or "?" in text:
+                return False
+            return True
+        
+        for pos, (idx, text) in enumerate(paragraphs):
+            current = text.strip()
+            if not current:
+                continue
+            
+            include = False
+            if marker_pattern.match(current):
+                include = True
+            elif "？" in current or "?" in current:
+                nxt = next_non_empty_text(pos)
+                include = nxt is None or not looks_answer_like(nxt)
+            elif any(keyword in current for keyword in task_keywords):
+                include = True
+            
+            if include:
+                before, after = handler.get_context_around_index(idx)
+                points.append(InsertionPoint(idx, current, before, after))
         
         return points
     
